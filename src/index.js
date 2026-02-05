@@ -54,9 +54,9 @@ client.once("ready", async () => {
 
 // ✅ Features (config kaldırıldı)
 try {
-  require("./features/voiceManager")(client, db);
+  require("./features/VoiceManager")(client, db);
 } catch (e) {
-  console.error("voiceManager load hatası:", e?.message || e);
+  console.error("VoiceManager load hatası:", e?.message || e);
 }
 
 try {
@@ -67,3 +67,4 @@ try {
 
 // ✅ EN SON login (client tanımlandıktan sonra)
 client.login(TOKEN);
+
