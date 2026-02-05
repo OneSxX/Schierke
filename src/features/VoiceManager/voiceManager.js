@@ -13,6 +13,10 @@
  * FIX ✅ (SLASH TARGET):
  * - /setup /panel /kapat komutları artık opsiyonel "kanal" parametresi ile hedef voice seçebilir.
  * - kanal verilmezse: kullanıcının bulunduğu voice kullanılır.
+ *
+ * FIX ✅ (PERM CLEANUP):
+ * - Allow/deny/mod listesinden çıkarılan kullanıcıların eski permission overwrite'ları temizlenir.
+ * - Böylece "listeden sildim ama hala girebiliyor" / "yetkisini aldım ama kalıyor" problemi biter.
  */
 
 const {
@@ -76,9 +80,31 @@ async function safeFollowUp(interaction, payload) {
 
 // -------------------- Voice perms --------------------
 async function applyVoicePerms(guild, voice, data) {
+  const everyoneId = guild.roles.everyone.id;
+
+  // Eski dokunduklarımız (stale overwrite temizliği için)
+  const previouslyManaged = new Set(data.managedPermIds || []);
+
+  // Şu an yönetilecek kullanıcılar
+  const desiredManaged = new Set(
+    [
+      data.ownerId,
+      ...(data.mods || []),
+      ...(data.allow || []),
+      ...(data.deny || []),
+    ].filter(Boolean)
+  );
+
+  // ✅ Listeden çıkarılanların overwrite'unu temizle
+  for (const id of previouslyManaged) {
+    if (!desiredManaged.has(id) && id !== everyoneId) {
+      await voice.permissionOverwrites.delete(id).catch(() => {});
+    }
+  }
+
   // @everyone connect
   await voice.permissionOverwrites
-    .edit(guild.roles.everyone, { Connect: data.locked ? false : true })
+    .edit(everyoneId, { Connect: data.locked ? false : true })
     .catch(() => {});
 
   // deny list
@@ -92,10 +118,13 @@ async function applyVoicePerms(guild, voice, data) {
   }
 
   // owner + mods always connect
-  await voice.permissionOverwrites.edit(data.ownerId, { Connect: true }).catch(() => {});
+  if (data.ownerId) await voice.permissionOverwrites.edit(data.ownerId, { Connect: true }).catch(() => {});
   for (const id of data.mods || []) {
     await voice.permissionOverwrites.edit(id, { Connect: true }).catch(() => {});
   }
+
+  // ✅ Managed set'i güncelle
+  data.managedPermIds = Array.from(desiredManaged);
 }
 
 // -------------------- Panel UI --------------------
@@ -202,8 +231,11 @@ async function autoUpdateTempTemplateFromChannel(db, guildId, voice, data) {
 }
 
 async function afterChange(db, guild, voice, data, panelChannel) {
-  await db.set(VC_KEY(panelChannel.id), data);
+  // ✅ önce uygula (managedPermIds burada güncelleniyor)
   await applyVoicePerms(guild, voice, data);
+  // ✅ sonra DB'ye yaz
+  await db.set(VC_KEY(panelChannel.id), data);
+
   await upsertPanel(panelChannel, data, db);
   await autoUpdateTempTemplateFromChannel(db, guild.id, voice, data);
 }
@@ -233,6 +265,9 @@ async function getManaged(db, interaction) {
 
   const data = await db.get(VC_KEY(panelChannel.id));
   if (!data) return { error: "Bu voice kanal bot tarafından yönetilmiyor." };
+
+  // Backward compat: eski kayıtlarda yoksa ekle
+  if (!Array.isArray(data.managedPermIds)) data.managedPermIds = [];
 
   return { voice, panelChannel, data };
 }
@@ -285,11 +320,13 @@ module.exports = function registerVoiceManager(client, db) {
           userLimit: limit,
           persistent: false,
           panelMessageId: null,
+          managedPermIds: [], // ✅ NEW
         };
 
         await db.set(VC_KEY(panelChannel.id), data);
 
         applyVoicePerms(guild, voice, data).catch(() => {});
+        // applyVoicePerms data'yı günceller ama db set zaten yukarıda; sorun değil, ilk panelde overwrite temizliği yok
         upsertPanel(panelChannel, data, db).catch(() => {});
       }
 
@@ -346,7 +383,6 @@ module.exports = function registerVoiceManager(client, db) {
         }
 
         // ✅ /setup /panel /kapat hedef seçimi
-        // kanal verilmezse: kullanıcının bulunduğu voice
         const optCh = interaction.options.getChannel("kanal", false);
         let voice = optCh ?? interaction.member?.voice?.channel;
 
@@ -375,10 +411,12 @@ module.exports = function registerVoiceManager(client, db) {
             userLimit: voice.userLimit ?? 0,
             persistent: true,
             panelMessageId: null,
+            managedPermIds: [], // ✅ NEW
           };
 
-          await db.set(VC_KEY(panelChannel.id), data);
+          // önce bas, sonra perms uygulayıp DB'ye güncel haliyle kaydet
           await applyVoicePerms(interaction.guild, voice, data);
+          await db.set(VC_KEY(panelChannel.id), data);
           await upsertPanel(panelChannel, data, db);
 
           return safeReply(interaction, { content: `✅ Kalıcı panel kuruldu: **${voice.name}**`, ephemeral: true });
