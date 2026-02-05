@@ -213,7 +213,7 @@ async function getManaged(db, interaction) {
 }
 
 // ==================== EXPORT: REGISTER ====================
-module.exports = function registerVoiceManager(client, db, config) {
+module.exports = function registerVoiceManager(client, db) {
   // TEMP voice join-to-create
   client.on("voiceStateUpdate", async (oldState, newState) => {
     try {
@@ -542,3 +542,4 @@ module.exports.applyVoicePerms = applyVoicePerms;
 module.exports.upsertPanel = upsertPanel;
 module.exports.VC_KEY = VC_KEY;
 module.exports.TEMP_TEMPLATE_KEY = TEMP_TEMPLATE_KEY;
+
