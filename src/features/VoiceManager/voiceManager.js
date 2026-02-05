@@ -290,7 +290,9 @@ client.on("interactionCreate", async (interaction) => {
     // -------- SLASH (sadece voice komutları) --------
     if (interaction.isChatInputCommand()) {
       const allowed = new Set(["setcreate", "setup", "panel", "kapat"]);
-      if (!allowed.has(interaction.commandName)) return; // ticket vs. dokunma
+
+// ✅ Voice dışı komutları bu dosyada hiç işleme
+if (!allowed.has(interaction.commandName)) return;
 
       await interaction.deferReply({ ephemeral: true }).catch(() => {});
 
@@ -430,8 +432,14 @@ client.on("interactionCreate", async (interaction) => {
     }
 
       // -------- BUTTONS --------
-      if (interaction.isButton()) {
-        const pack = await getManaged(db, interaction);
+     if (interaction.isButton()) {
+  // ✅ Ticket butonlarına dokunma (voice manager çakışmasın)
+  const id = interaction.customId || "";
+  if (id.startsWith("ticket_") || id === "ticket_open") return;
+
+  const pack = await getManaged(db, interaction);
+  ...
+}
         if (pack.error) return safeReply(interaction, { content: pack.error, ephemeral: true });
 
         const { voice, panelChannel, data } = pack;
@@ -542,4 +550,5 @@ module.exports.applyVoicePerms = applyVoicePerms;
 module.exports.upsertPanel = upsertPanel;
 module.exports.VC_KEY = VC_KEY;
 module.exports.TEMP_TEMPLATE_KEY = TEMP_TEMPLATE_KEY;
+
 
