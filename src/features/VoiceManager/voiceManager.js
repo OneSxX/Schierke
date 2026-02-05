@@ -17,6 +17,10 @@
  * FIX ✅ (PERM CLEANUP):
  * - Allow/deny/mod listesinden çıkarılan kullanıcıların eski permission overwrite'ları temizlenir.
  * - Böylece "listeden sildim ama hala girebiliyor" / "yetkisini aldım ama kalıyor" problemi biter.
+ *
+ * FIX ✅ (/kapat FULL RESET):
+ * - Kanal adı hariç her şeyi sıfırlar: overwrite'lar temizlenir, userLimit 0 yapılır, panel mesajı silinir,
+ *   DB kaydı silinir. Sonra /setup ile tertemiz kurulur.
  */
 
 const {
@@ -266,9 +270,7 @@ async function getManaged(db, interaction) {
   const data = await db.get(VC_KEY(panelChannel.id));
   if (!data) return { error: "Bu voice kanal bot tarafından yönetilmiyor." };
 
-  // Backward compat: eski kayıtlarda yoksa ekle
   if (!Array.isArray(data.managedPermIds)) data.managedPermIds = [];
-
   return { voice, panelChannel, data };
 }
 
@@ -320,13 +322,12 @@ module.exports = function registerVoiceManager(client, db) {
           userLimit: limit,
           persistent: false,
           panelMessageId: null,
-          managedPermIds: [], // ✅ NEW
+          managedPermIds: [],
         };
 
         await db.set(VC_KEY(panelChannel.id), data);
 
         applyVoicePerms(guild, voice, data).catch(() => {});
-        // applyVoicePerms data'yı günceller ama db set zaten yukarıda; sorun değil, ilk panelde overwrite temizliği yok
         upsertPanel(panelChannel, data, db).catch(() => {});
       }
 
@@ -411,10 +412,9 @@ module.exports = function registerVoiceManager(client, db) {
             userLimit: voice.userLimit ?? 0,
             persistent: true,
             panelMessageId: null,
-            managedPermIds: [], // ✅ NEW
+            managedPermIds: [],
           };
 
-          // önce bas, sonra perms uygulayıp DB'ye güncel haliyle kaydet
           await applyVoicePerms(interaction.guild, voice, data);
           await db.set(VC_KEY(panelChannel.id), data);
           await upsertPanel(panelChannel, data, db);
@@ -434,15 +434,38 @@ module.exports = function registerVoiceManager(client, db) {
           return safeReply(interaction, { content: `✅ Panel güncellendi: **${voice.name}**`, ephemeral: true });
         }
 
+        // ✅✅✅ UPDATED: /kapat FULL RESET (isim hariç her şey sıfır)
         if (interaction.commandName === "kapat") {
           if (!isServerOwnerOrAdmin(interaction.member)) {
             return safeReply(interaction, { content: "Bu komutu sadece admin/sunucu sahibi kullanabilir.", ephemeral: true });
           }
+
           const data = await db.get(VC_KEY(panelChannel.id));
           if (!data) return safeReply(interaction, { content: "Bu kanal yönetilmiyor.", ephemeral: true });
 
+          // 1) Panel mesajını sil (varsa)
+          try {
+            if (panelChannel?.isTextBased?.() && data.panelMessageId) {
+              const msg = await panelChannel.messages.fetch(data.panelMessageId).catch(() => null);
+              if (msg) await msg.delete().catch(() => {});
+            }
+          } catch (e) {
+            // ignore
+          }
+
+          // 2) Limit sıfırla
+          await panelChannel.setUserLimit(0).catch(() => {});
+
+          // 3) Tüm overwrite'ları sıfırla (kategori/varsayılan ayara dön)
+          await panelChannel.permissionOverwrites.set([]).catch(() => {});
+
+          // 4) DB kaydını sil
           await db.delete(VC_KEY(panelChannel.id));
-          return safeReply(interaction, { content: `🛑 Yönetim kapatıldı: **${voice.name}**`, ephemeral: true });
+
+          return safeReply(interaction, {
+            content: `🧼 Kanal sıfırlandı (isim korunur) ve yönetim kapatıldı: **${panelChannel.name}**`,
+            ephemeral: true,
+          });
         }
 
         return;
