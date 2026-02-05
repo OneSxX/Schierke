@@ -149,10 +149,11 @@ async function upsertPanel(panelChannel, data, db) {
     let msg = null;
     if (data.panelMessageId) {
       try {
-        msg = await panelChannel.messages.fetch(data.panelMessageId);
-      } catch (_) {
-        msg = null;
-      }
+  msg = await panelChannel.messages.fetch(data.panelMessageId);
+} catch (e) {
+  msg = null;
+}
+
     }
 
     if (!msg) {
@@ -160,14 +161,16 @@ async function upsertPanel(panelChannel, data, db) {
       data.panelMessageId = msg.id;
       await db.set(VC_KEY(panelChannel.id), data);
       try {
-        await msg.pin();
-      } catch (_) {}
+  await msg.pin();
+} catch (e) {
+  // pinlenemediyse umursama
     } else {
       await msg.edit({ content, components }).catch(() => {});
       try {
-        if (!msg.pinned) await msg.pin();
-      } catch (_) {}
-    }
+  if (!msg.pinned) await msg.pin();
+} catch (e) {
+  // pinlenemediyse umursama
+}
   };
 
   clearTimeout(panelTimers.get(panelChannel.id));
@@ -224,6 +227,13 @@ module.exports = function registerVoiceManager(client, db) {
       const createId = gcfg?.createChannelId;
 
       if (createId && newState.channelId === createId) {
+        // ✅ buraya senin mevcut kanal oluşturma kodun geliyor
+      // ...
+    }
+  } catch (e) {
+    console.error("[VoiceManager voiceStateUpdate]", e);
+  }
+});
         const guild = newState.guild;
         const parentId = newState.channel?.parentId ?? null;
 
@@ -288,14 +298,16 @@ module.exports = function registerVoiceManager(client, db) {
 client.on("interactionCreate", async (interaction) => {
   try {
     // -------- SLASH (sadece voice komutları) --------
-    if (interaction.isChatInputCommand()) {
+    if (interaction.isChatInputCommand()) {}
       const allowed = new Set(["setcreate", "setup", "panel", "kapat"]);
 
 // ✅ Voice dışı komutları bu dosyada hiç işleme
 if (!allowed.has(interaction.commandName)) return;
 
-      await interaction.deferReply({ ephemeral: true }).catch(() => {});
-
+      await interaction.deferReply({ ephemeral: true } catch (e) {
+  console.error("[VoiceManager interactionCreate]", e);
+}
+});
       // /setcreate
       if (interaction.commandName === "setcreate") {
         if (!isServerOwnerOrAdmin(interaction.member)) {
@@ -550,6 +562,7 @@ module.exports.applyVoicePerms = applyVoicePerms;
 module.exports.upsertPanel = upsertPanel;
 module.exports.VC_KEY = VC_KEY;
 module.exports.TEMP_TEMPLATE_KEY = TEMP_TEMPLATE_KEY;
+
 
 
 
