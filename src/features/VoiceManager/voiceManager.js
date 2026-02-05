@@ -9,6 +9,10 @@
  * - Panelden yapılan tüm işlemler artık interaction.member.voice.channel yerine
  *   panelin bulunduğu voice channel (interaction.channelId) üzerinden yapılır.
  * - customId'lere kanalId gömülür (btn_/sel_/m_ ... :<channelId>) (ek güvenlik)
+ *
+ * FIX ✅ (SLASH TARGET):
+ * - /setup /panel /kapat komutları artık opsiyonel "kanal" parametresi ile hedef voice seçebilir.
+ * - kanal verilmezse: kullanıcının bulunduğu voice kullanılır.
  */
 
 const {
@@ -145,7 +149,6 @@ function buildPanelComponents(data, targetChannelId) {
 
 const panelTimers = new Map();
 async function upsertPanel(panelChannel, data, db) {
-  // Voice channel chat desteklenmiyorsa sessizce çık
   if (!panelChannel?.isTextBased?.()) return;
 
   const doEdit = async () => {
@@ -167,16 +170,12 @@ async function upsertPanel(panelChannel, data, db) {
       await db.set(VC_KEY(panelChannel.id), data);
       try {
         await msg.pin();
-      } catch (e) {
-        // ignore
-      }
+      } catch (e) {}
     } else {
       await msg.edit({ content, components }).catch(() => {});
       try {
         if (!msg.pinned) await msg.pin();
-      } catch (e) {
-        // ignore
-      }
+      } catch (e) {}
     }
   };
 
@@ -218,29 +217,20 @@ function extractTargetChannelIdFromCustomId(customId) {
   return /^\d{15,25}$/.test(maybeId) ? maybeId : null;
 }
 
-/**
- * ✅ FINAL FIX:
- * Panel voice channel chat'inde çalıştığı için hedef kanal her zaman interaction.channelId'dir.
- * customId'deki id sadece "ek güvenlik" olarak tutulur.
- */
 async function getManaged(db, interaction) {
-  // 1) Panelin bulunduğu kanal (voice chat)
   const panelChannel = await interaction.guild.channels.fetch(interaction.channelId).catch(() => null);
   if (!panelChannel || panelChannel.type !== ChannelType.GuildVoice) {
     return { error: "Panel sadece voice kanal chat'inde kullanılabilir." };
   }
 
-  // 2) Ek doğrulama: customId'deki kanalId farklıysa bile panelChannel'i esas al
   const customId = interaction.customId || "";
   const hintedId = extractTargetChannelIdFromCustomId(customId);
   if (hintedId && hintedId !== panelChannel.id) {
-    // Eski mesaj / kopyalanmış panel gibi durumlarda güvenlik için ignore ediyoruz.
-    // İstersen burada log basabilirsin.
+    // ignore
   }
 
   const voice = panelChannel;
 
-  // 3) Bu voice yönetiliyor mu?
   const data = await db.get(VC_KEY(panelChannel.id));
   if (!data) return { error: "Bu voice kanal bot tarafından yönetilmiyor." };
 
@@ -249,19 +239,17 @@ async function getManaged(db, interaction) {
 
 // ==================== EXPORT: REGISTER ====================
 module.exports = function registerVoiceManager(client, db) {
-  // -------------------- VOICE STATE --------------------
   client.on("voiceStateUpdate", async (oldState, newState) => {
     try {
       if (!newState.guild || !newState.member) return;
 
-      // 1) Join-to-create: kullanıcı create kanalına girdi mi?
       const gcfg = await db.get(GUILD_CFG_KEY(newState.guild.id));
       const createId = gcfg?.createChannelId;
+
       if (createId && newState.channelId === createId) {
         const guild = newState.guild;
         const parentId = newState.channel?.parentId ?? null;
 
-        // sunucuya özel template
         let baseTpl = await db.get(TEMP_TEMPLATE_KEY(guild.id));
         if (!baseTpl) {
           baseTpl = { mods: [], allow: [], deny: [], locked: false, userLimit: 0 };
@@ -281,10 +269,8 @@ module.exports = function registerVoiceManager(client, db) {
           parent: parentId,
         });
 
-        // kullanıcıyı hemen taşı
         await newState.member.voice.setChannel(voice).catch(() => {});
 
-        // limit uygula
         const limit = Number.isInteger(baseTpl?.userLimit) ? baseTpl.userLimit : 0;
         await voice.setUserLimit(limit).catch(() => {});
 
@@ -303,12 +289,10 @@ module.exports = function registerVoiceManager(client, db) {
 
         await db.set(VC_KEY(panelChannel.id), data);
 
-        // perms & panel arkadan
         applyVoicePerms(guild, voice, data).catch(() => {});
         upsertPanel(panelChannel, data, db).catch(() => {});
       }
 
-      // 2) temp oda boşsa sil
       if (oldState.channel) {
         const data = await db.get(VC_KEY(oldState.channel.id));
         if (data && !data.persistent && oldState.channel.members.size === 0) {
@@ -321,10 +305,8 @@ module.exports = function registerVoiceManager(client, db) {
     }
   });
 
-  // -------------------- INTERACTIONS (VOICE) --------------------
   client.on("interactionCreate", async (interaction) => {
     try {
-      // Ticket butonlarını komple es geç (t_open_complaint, t_close, vs)
       if (interaction.isButton()) {
         const id = interaction.customId || "";
         if (id.startsWith("t_")) return;
@@ -363,17 +345,23 @@ module.exports = function registerVoiceManager(client, db) {
           return safeReply(interaction, { content: `✅ Join-to-create ayarlandı: **${ch.name}**`, ephemeral: true });
         }
 
-        // diğer slashlar voice ister (kalıcı panel kuracağın kanalın içinde olman yeter)
-        const voice = interaction.member?.voice?.channel;
+        // ✅ /setup /panel /kapat hedef seçimi
+        // kanal verilmezse: kullanıcının bulunduğu voice
+        const optCh = interaction.options.getChannel("kanal", false);
+        let voice = optCh ?? interaction.member?.voice?.channel;
+
+        await interaction.deferReply({ ephemeral: true }).catch(() => {});
+
         if (!voice) {
-          await interaction.deferReply({ ephemeral: true }).catch(() => {});
-          return safeReply(interaction, { content: "Voice kanalda değilsin.", ephemeral: true });
+          return safeReply(interaction, { content: "Hedef voice seç veya bir voice kanala gir.", ephemeral: true });
+        }
+        if (voice.type !== ChannelType.GuildVoice) {
+          return safeReply(interaction, { content: "Lütfen bir **VOICE kanal** seç.", ephemeral: true });
         }
 
         const panelChannel = voice;
 
         if (interaction.commandName === "setup") {
-          await interaction.deferReply({ ephemeral: true }).catch(() => {});
           if (!isServerOwnerOrAdmin(interaction.member)) {
             return safeReply(interaction, { content: "Bu komutu sadece admin/sunucu sahibi kullanabilir.", ephemeral: true });
           }
@@ -393,11 +381,10 @@ module.exports = function registerVoiceManager(client, db) {
           await applyVoicePerms(interaction.guild, voice, data);
           await upsertPanel(panelChannel, data, db);
 
-          return safeReply(interaction, { content: "✅ Kalıcı panel kuruldu.", ephemeral: true });
+          return safeReply(interaction, { content: `✅ Kalıcı panel kuruldu: **${voice.name}**`, ephemeral: true });
         }
 
         if (interaction.commandName === "panel") {
-          await interaction.deferReply({ ephemeral: true }).catch(() => {});
           const data = await db.get(VC_KEY(panelChannel.id));
           if (!data) return safeReply(interaction, { content: "Bu kanal yönetilmiyor.", ephemeral: true });
 
@@ -406,11 +393,10 @@ module.exports = function registerVoiceManager(client, db) {
           }
 
           await upsertPanel(panelChannel, data, db);
-          return safeReply(interaction, { content: "✅ Panel güncellendi.", ephemeral: true });
+          return safeReply(interaction, { content: `✅ Panel güncellendi: **${voice.name}**`, ephemeral: true });
         }
 
         if (interaction.commandName === "kapat") {
-          await interaction.deferReply({ ephemeral: true }).catch(() => {});
           if (!isServerOwnerOrAdmin(interaction.member)) {
             return safeReply(interaction, { content: "Bu komutu sadece admin/sunucu sahibi kullanabilir.", ephemeral: true });
           }
@@ -418,7 +404,7 @@ module.exports = function registerVoiceManager(client, db) {
           if (!data) return safeReply(interaction, { content: "Bu kanal yönetilmiyor.", ephemeral: true });
 
           await db.delete(VC_KEY(panelChannel.id));
-          return safeReply(interaction, { content: "🛑 Yönetim kapatıldı.", ephemeral: true });
+          return safeReply(interaction, { content: `🛑 Yönetim kapatıldı: **${voice.name}**`, ephemeral: true });
         }
 
         return;
