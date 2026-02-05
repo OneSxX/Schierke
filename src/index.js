@@ -1,8 +1,9 @@
 // src/index.js
 const { Client, GatewayIntentBits } = require("discord.js");
 const { QuickDB } = require("quick.db");
-const config = require("../config.json");
 const { registerGlobalCommands } = require("./commands/register");
+const TOKEN = process.env.TOKEN;
+client.login(TOKEN);
 
 // ✅ Tek client, tek login
 const client = new Client({
@@ -46,4 +47,3 @@ require("./features/voiceManager")(client, db, config);
 
 // ✅ Yeni feature (şimdilik boş kalsın, hata vermesin)
 require("./features/Ticket")(client, db, config);
-client.login(config.token);
