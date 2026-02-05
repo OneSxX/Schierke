@@ -27,6 +27,7 @@ async function safeReply(interaction, payload) {
   } catch (_) {}
 }
 
+// ===== Panel UI =====
 function panelEmbed() {
   return new EmbedBuilder()
     .setTitle("Ticket")
@@ -52,8 +53,9 @@ function closeComponents() {
   ];
 }
 
-// Log kanalına mesaj at
+// Log kanalına mesaj at (log opsiyonel)
 async function sendTicketLog(guild, logChannelId, payload) {
+  if (!logChannelId) return;
   const logCh = await guild.channels.fetch(logChannelId).catch(() => null);
   if (!logCh?.isTextBased?.()) return;
   await logCh.send(payload).catch(() => {});
@@ -71,6 +73,8 @@ async function ensurePanelPerms(guild, panelCh) {
 
 // Log kanalı izinleri: everyone göremesin, sadece yetkili rol + bot görebilsin
 async function ensureLogPerms(guild, logCh, staffRoleId) {
+  if (!logCh) return;
+
   await logCh.permissionOverwrites
     .edit(guild.roles.everyone.id, {
       ViewChannel: false,
@@ -97,9 +101,94 @@ async function ensureLogPerms(guild, logCh, staffRoleId) {
       .edit(staffRoleId, {
         ViewChannel: true,
         ReadMessageHistory: true,
+        SendMessages: true,
       })
       .catch(() => {});
   }
+}
+
+// ✅ Bir mesaj "ticket panel" mi? (embed title + buton customId ile)
+function isTicketPanelMessage(msg) {
+  // embed başlığı Ticket mi?
+  const hasTicketEmbed =
+    Array.isArray(msg.embeds) &&
+    msg.embeds.some((e) => (e?.title || "").toLowerCase().trim() === "ticket");
+
+  if (!hasTicketEmbed) return false;
+
+  // içinde t_open_complaint butonu var mı?
+  const hasOpenButton =
+    Array.isArray(msg.components) &&
+    msg.components.some((row) =>
+      row.components?.some((c) => c?.customId === "t_open_complaint")
+    );
+
+  return hasOpenButton;
+}
+
+// ✅ Panel kanalda eski panel mesajlarını yakalayıp temizle (son N mesajdan)
+async function cleanupOldTicketPanels(panelCh, maxScan = 75) {
+  if (!panelCh?.isTextBased?.()) return 0;
+
+  const me = panelCh.guild.members.me;
+  if (!me) return 0;
+
+  // ManageMessages yoksa toplu temizlik yapamayız (sessiz geç)
+  const perms = panelCh.permissionsFor(me);
+  if (!perms?.has(PermissionFlagsBits.ManageMessages)) {
+    return 0;
+  }
+
+  const msgs = await panelCh.messages.fetch({ limit: Math.min(maxScan, 100) }).catch(() => null);
+  if (!msgs) return 0;
+
+  let deleted = 0;
+
+  // Sadece botun kendi attığı panel mesajlarını sil
+  const myId = me.id;
+
+  for (const msg of msgs.values()) {
+    // bot mesajı değilse dokunma
+    if (msg.author?.id !== myId) continue;
+
+    if (isTicketPanelMessage(msg)) {
+      await msg.delete().catch(() => {});
+      deleted += 1;
+    }
+  }
+
+  return deleted;
+}
+
+// ✅ Panel mesajını “tek” tut: varsa eskileri temizle, yenisini at, pinle
+async function replaceTicketPanelMessage(guild, cfg, db) {
+  const panelCh = await guild.channels.fetch(cfg.panelChannelId).catch(() => null);
+  if (!panelCh?.isTextBased?.()) return { ok: false, error: "Panel kanalı bulunamadı." };
+
+  await ensurePanelPerms(guild, panelCh);
+
+  // 1) DB’de kayıtlı panel mesajı varsa silmeyi dene
+  if (cfg.panelMessageId) {
+    const old = await panelCh.messages.fetch(cfg.panelMessageId).catch(() => null);
+    if (old) await old.delete().catch(() => {});
+  }
+
+  // 2) ✅ Kanaldaki “eski panel” mesajlarını yakala & temizle (botun attıkları)
+  await cleanupOldTicketPanels(panelCh, 75);
+
+  // 3) Yeni panel bas
+  const msg = await panelCh.send({ embeds: [panelEmbed()], components: panelComponents() });
+
+  // 4) Pinle (izin yoksa sessiz geç)
+  try {
+    if (!msg.pinned) await msg.pin();
+  } catch (_) {}
+
+  // 5) cfg içine panelMessageId yaz
+  cfg.panelMessageId = msg.id;
+  await db.set(TCFG(guild.id), cfg);
+
+  return { ok: true, panelChannel: panelCh, message: msg };
 }
 
 module.exports = function registerTicket(client, db, config) {
@@ -114,39 +203,46 @@ module.exports = function registerTicket(client, db, config) {
 
         // /ticket setup
         if (sub === "setup") {
+          // ✅ sıra: kategori -> log -> panel
+          const kategori = interaction.options.getChannel("kategori", true);
+          const logCh = interaction.options.getChannel("log", false); // opsiyonel
           const panelCh = interaction.options.getChannel("panel", true);
-          const logCh = interaction.options.getChannel("log", true); // zorunlu
-          const kategori = interaction.options.getChannel("kategori", false);
           const yetkiliRol = interaction.options.getRole("yetkili_rol", false);
 
-          if (panelCh.type !== ChannelType.GuildText) {
+          // Validations
+          if (kategori.type !== ChannelType.GuildCategory) {
+            return safeReply(interaction, { content: "Ticket kategorisi bir **kategori** olmalı.", ephemeral: true });
+          }
+
+          if (panelCh.type !== ChannelType.GuildText && panelCh.type !== ChannelType.GuildAnnouncement) {
             return safeReply(interaction, { content: "Panel kanalı bir **yazı kanalı** olmalı.", ephemeral: true });
           }
-          if (logCh.type !== ChannelType.GuildText) {
+
+          if (logCh && logCh.type !== ChannelType.GuildText && logCh.type !== ChannelType.GuildAnnouncement) {
             return safeReply(interaction, { content: "Log kanalı bir **yazı kanalı** olmalı.", ephemeral: true });
-          }
-          if (kategori && kategori.type !== ChannelType.GuildCategory) {
-            return safeReply(interaction, { content: "Kategori seçersen **kategori** olmalı.", ephemeral: true });
           }
 
           await ensurePanelPerms(interaction.guild, panelCh);
-          await ensureLogPerms(interaction.guild, logCh, yetkiliRol?.id || null);
+          if (logCh) await ensureLogPerms(interaction.guild, logCh, yetkiliRol?.id || null);
 
-          await db.set(TCFG(interaction.guildId), {
+          // ✅ cfg kaydet (panelMessageId de dahil)
+          const cfg = {
             panelChannelId: panelCh.id,
-            categoryId: kategori?.id || null,
+            categoryId: kategori.id,
             staffRoleId: yetkiliRol?.id || null,
-            logChannelId: logCh.id,
-          });
+            logChannelId: logCh?.id || null, // opsiyonel
+            panelMessageId: null,
+          };
+          await db.set(TCFG(interaction.guildId), cfg);
 
           return safeReply(interaction, {
             content:
               `✅ Ticket sistemi kuruldu.\n` +
+              `• Kategori: <#${kategori.id}>\n` +
+              `• Log: ${logCh ? `<#${logCh.id}>` : "**Kapalı (seçilmedi)**"}\n` +
               `• Panel: <#${panelCh.id}>\n` +
-              `• Log: <#${logCh.id}>\n` +
-              `• Kategori: ${kategori ? `<#${kategori.id}>` : "Yok"}\n` +
               `• Yetkili rol: ${yetkiliRol ? `<@&${yetkiliRol.id}>` : "Yok"}\n\n` +
-              `ℹ️ Panel kanalı herkes görebilir. Log kanalı sadece yetkililer görebilir.`,
+              `ℹ️ Paneli yenilemek için: **/ticket panel** (kanaldaki eski panelleri de temizler).`,
             ephemeral: true,
           });
         }
@@ -154,19 +250,19 @@ module.exports = function registerTicket(client, db, config) {
         // /ticket panel
         if (sub === "panel") {
           const cfg = await db.get(TCFG(interaction.guildId));
-          if (!cfg?.panelChannelId) {
+          if (!cfg?.panelChannelId || !cfg?.categoryId) {
             return safeReply(interaction, { content: "Önce `/ticket setup` yap.", ephemeral: true });
           }
 
-          const panelCh = await interaction.guild.channels.fetch(cfg.panelChannelId).catch(() => null);
-          if (!panelCh?.isTextBased?.()) {
-            return safeReply(interaction, { content: "Panel kanalı bulunamadı. `/ticket setup` tekrar yap.", ephemeral: true });
+          const res = await replaceTicketPanelMessage(interaction.guild, cfg, db);
+          if (!res.ok) {
+            return safeReply(interaction, {
+              content: "Panel basılamadı: " + (res.error || "Bilinmeyen hata"),
+              ephemeral: true,
+            });
           }
 
-          await ensurePanelPerms(interaction.guild, panelCh);
-
-          await panelCh.send({ embeds: [panelEmbed()], components: panelComponents() });
-          return safeReply(interaction, { content: "✅ Ticket panel basıldı.", ephemeral: true });
+          return safeReply(interaction, { content: "✅ Ticket panel yenilendi (eski paneller temizlendi).", ephemeral: true });
         }
 
         // /ticket off
@@ -290,10 +386,26 @@ module.exports = function registerTicket(client, db, config) {
 
           await ch.send({ embeds: [embed], components: closeComponents() });
 
+          // Açılış logu (opsiyonel)
+          await sendTicketLog(interaction.guild, cfg.logChannelId, {
+            embeds: [
+              new EmbedBuilder()
+                .setTitle("🎫 Ticket Açıldı")
+                .setDescription(
+                  `**Ticket ID:** ${pad(n)}\n` +
+                    `**Kategori:** Şikayet ve bildirileriniz için\n` +
+                    `**Açan:** <@${interaction.user.id}> (${interaction.user.tag})\n` +
+                    `**Kanal:** <#${ch.id}>\n` +
+                    `**Açılış:** <t:${Math.floor(Date.now() / 1000)}:f>\n\n` +
+                    `**Şikayet / Bildiri:**\n${complaint}`
+                ),
+            ],
+          });
+
           return safeReply(interaction, { content: `✅ Ticket açıldı: <#${ch.id}>`, ephemeral: true });
         }
 
-        // Modal: ticket kapat + LOG
+        // Modal: ticket kapat + LOG (opsiyonel)
         if (interaction.customId === "t_modal_close") {
           await interaction.deferReply({ ephemeral: true }).catch(() => {});
 
