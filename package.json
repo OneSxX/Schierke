@@ -1,0 +1,19 @@
+{
+  "name": "air",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "baran",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.6.2",
+    "discord.js": "^14.25.1",
+    "quick.db": "^9.1.7"
+  },
+  "keywords": []
+}
