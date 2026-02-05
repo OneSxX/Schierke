@@ -1,11 +1,16 @@
 // src/index.js
 const { Client, GatewayIntentBits } = require("discord.js");
 const { QuickDB } = require("quick.db");
-const { registerGlobalCommands } = require("./commands/register");
-const TOKEN = process.env.TOKEN;
-client.login(TOKEN);
 
-// ✅ Tek client, tek login
+// Eğer bu dosya kullanılıyorsa kalsın, yoksa kaldırabilirsin
+// const { registerGlobalCommands } = require("./commands/register");
+
+const TOKEN = process.env.TOKEN;
+if (!TOKEN) {
+  throw new Error("TOKEN env missing. Railway Variables kısmına TOKEN ekle.");
+}
+
+// ✅ Tek client
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -32,18 +37,33 @@ client.once("ready", async () => {
       status: "online",
       activities: [{ name: "Voice Manager", type: 0 }],
     });
-  } catch (_) {}
+  } catch (e) {
+    console.error("Presence hatası:", e?.message || e);
+  }
 
-  // ✅ Slash register (tek yer)
+  // ✅ Slash register (opsiyonel)
+  // Eğer registerGlobalCommands fonksiyonun token istemiyorsa bunu aç:
+  /*
   try {
-    await registerGlobalCommands(client.application.id, config.token);
+    await registerGlobalCommands(client.application.id);
   } catch (e) {
     console.error("Slash register hatası:", e?.message || e);
   }
+  */
 });
 
-// ✅ Features
-require("./features/voiceManager")(client, db, config);
+// ✅ Features (config kaldırıldı)
+try {
+  require("./features/voiceManager")(client, db);
+} catch (e) {
+  console.error("voiceManager load hatası:", e?.message || e);
+}
 
-// ✅ Yeni feature (şimdilik boş kalsın, hata vermesin)
-require("./features/Ticket")(client, db, config);
+try {
+  require("./features/Ticket")(client, db);
+} catch (e) {
+  console.error("Ticket load hatası:", e?.message || e);
+}
+
+// ✅ EN SON login (client tanımlandıktan sonra)
+client.login(TOKEN);
