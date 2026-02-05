@@ -13,32 +13,15 @@ async function registerGlobalCommands(appId, token) {
         {
           name: "kanal",
           description: "Oda oluşturma voice kanalı",
-          type: 7, // CHANNEL
+          type: 7,
           required: true,
-          // ✅ Sadece voice seçilsin
-          channel_types: [2], // 2 = GUILD_VOICE
-        },
-      ],
-    },
-
-    {
-      name: "setup",
-      description: "Seçilen voice kanalına panel ile yönetim kur (kalıcı).",
-      type: 1,
-      options: [
-        {
-          name: "kanal",
-          description: "Hedef voice kanal (boşsa bulunduğun kanal)",
-          type: 7, // CHANNEL
-          required: false,
           channel_types: [2], // GUILD_VOICE
         },
       ],
     },
-
     {
-      name: "panel",
-      description: "Seçilen voice kanala paneli bas/güncelle.",
+      name: "setup",
+      description: "Seçilen voice kanalına panel ile yönetim kur (kalıcı).",
       type: 1,
       options: [
         {
@@ -50,7 +33,11 @@ async function registerGlobalCommands(appId, token) {
         },
       ],
     },
-
+    {
+      name: "panel",
+      description: "Paneli bas/güncelle (Sadece voice kanal chat’inde).",
+      type: 1,
+    },
     {
       name: "kapat",
       description: "Seçilen voice kanalın yönetimini kapat (admin).",
@@ -67,7 +54,7 @@ async function registerGlobalCommands(appId, token) {
     },
 
     // =========================
-    // TICKET KOMUTLARI (istersen)
+    // TICKET KOMUTLARI
     // =========================
     {
       name: "ticket",
@@ -79,9 +66,34 @@ async function registerGlobalCommands(appId, token) {
           name: "setup",
           description: "Ticket panel ayarlarını kur",
           options: [
-            { name: "panel", description: "Ticket panelin atılacağı kanal", type: 7, required: true },
-            { name: "kategori", description: "Ticket kanallarının açılacağı kategori (opsiyonel)", type: 7, required: false },
-            { name: "yetkili_rol", description: "Yetkili rol (opsiyonel)", type: 8, required: false },
+            // ✅ SIRALAMA: kategori -> log -> panel
+            {
+              name: "kategori",
+              description: "Ticket kanallarının açılacağı kategori",
+              type: 7,
+              required: true,
+              channel_types: [4], // GUILD_CATEGORY
+            },
+            {
+              name: "log",
+              description: "Ticket log kanalı (otomatik oluşturulmaz)",
+              type: 7,
+              required: false,
+              channel_types: [0, 5], // text / announcement
+            },
+            {
+              name: "panel",
+              description: "Ticket panelin atılacağı kanal",
+              type: 7,
+              required: true,
+              channel_types: [0, 5],
+            },
+            {
+              name: "yetkili_rol",
+              description: "Yetkili rol (opsiyonel)",
+              type: 8,
+              required: false,
+            },
           ],
         },
         { type: 1, name: "panel", description: "Ticket panelini bas/güncelle" },
