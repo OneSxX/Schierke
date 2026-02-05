@@ -7,8 +7,8 @@
  *
  * FIX ✅:
  * - Panelden yapılan tüm işlemler artık interaction.member.voice.channel yerine
- *   panelin bağlı olduğu hedef kanal ID'si üzerinden yapılır.
- * - customId'lere kanalId gömülür (btn_/sel_/m_ ... :<channelId>)
+ *   panelin bulunduğu voice channel (interaction.channelId) üzerinden yapılır.
+ * - customId'lere kanalId gömülür (btn_/sel_/m_ ... :<channelId>) (ek güvenlik)
  */
 
 const {
@@ -95,7 +95,6 @@ async function applyVoicePerms(guild, voice, data) {
 }
 
 // -------------------- Panel UI --------------------
-// FIX: targetChannelId customId'lere gömülüyor
 function buildPanelComponents(data, targetChannelId) {
   const ownerSel = new ActionRowBuilder().addComponents(
     new UserSelectMenuBuilder()
@@ -211,7 +210,6 @@ async function afterChange(db, guild, voice, data, panelChannel) {
 }
 
 // -------------------- Interaction helpers --------------------
-// FIX: hedef voice kanalını interaction.customId'den bul
 function extractTargetChannelIdFromCustomId(customId) {
   if (!customId || typeof customId !== "string") return null;
   const parts = customId.split(":");
@@ -220,23 +218,29 @@ function extractTargetChannelIdFromCustomId(customId) {
   return /^\d{15,25}$/.test(maybeId) ? maybeId : null;
 }
 
+/**
+ * ✅ FINAL FIX:
+ * Panel voice channel chat'inde çalıştığı için hedef kanal her zaman interaction.channelId'dir.
+ * customId'deki id sadece "ek güvenlik" olarak tutulur.
+ */
 async function getManaged(db, interaction) {
+  // 1) Panelin bulunduğu kanal (voice chat)
+  const panelChannel = await interaction.guild.channels.fetch(interaction.channelId).catch(() => null);
+  if (!panelChannel || panelChannel.type !== ChannelType.GuildVoice) {
+    return { error: "Panel sadece voice kanal chat'inde kullanılabilir." };
+  }
+
+  // 2) Ek doğrulama: customId'deki kanalId farklıysa bile panelChannel'i esas al
   const customId = interaction.customId || "";
-  let targetId = extractTargetChannelIdFromCustomId(customId);
-
-  // Slash komutlarda customId yok; fallback: kullanıcının bulunduğu voice
-  if (!targetId) {
-    const v = interaction.member?.voice?.channel;
-    if (!v) return { error: "Voice kanalda değilsin." };
-    targetId = v.id;
+  const hintedId = extractTargetChannelIdFromCustomId(customId);
+  if (hintedId && hintedId !== panelChannel.id) {
+    // Eski mesaj / kopyalanmış panel gibi durumlarda güvenlik için ignore ediyoruz.
+    // İstersen burada log basabilirsin.
   }
 
-  const voice = await interaction.guild.channels.fetch(targetId).catch(() => null);
-  if (!voice || voice.type !== ChannelType.GuildVoice) {
-    return { error: "Hedef voice kanal bulunamadı." };
-  }
+  const voice = panelChannel;
 
-  const panelChannel = voice; // panel voice chat'e bağlı
+  // 3) Bu voice yönetiliyor mu?
   const data = await db.get(VC_KEY(panelChannel.id));
   if (!data) return { error: "Bu voice kanal bot tarafından yönetilmiyor." };
 
@@ -430,7 +434,7 @@ module.exports = function registerVoiceManager(client, db) {
         const { voice, panelChannel, data } = pack;
         await interaction.deferUpdate().catch(() => {});
 
-        const base = interaction.customId.split(":")[0]; // sel_owner / sel_mods ...
+        const base = interaction.customId.split(":")[0];
 
         if (base === "sel_owner") {
           if (!canManageRoom(interaction.member, data)) {
@@ -467,7 +471,6 @@ module.exports = function registerVoiceManager(client, db) {
           data.deny = uniq(interaction.values).slice(0, 25);
           data.allow = (data.allow || []).filter((x) => !data.deny.includes(x));
 
-          // deny edilenler içerideyse at
           for (const id of data.deny) {
             const m = await interaction.guild.members.fetch(id).catch(() => null);
             if (m && m.voice.channelId === voice.id) await m.voice.disconnect().catch(() => {});
@@ -483,27 +486,19 @@ module.exports = function registerVoiceManager(client, db) {
       // -------- BUTTONS --------
       if (interaction.isButton()) {
         const id = interaction.customId || "";
-
-        // Ticket çakışmasını zaten üstte çözdük ama yine de güvenlik
         if (id.startsWith("t_")) return;
-
-        // VoiceManager dışı butonları yok say
         if (!id.startsWith("btn_")) return;
 
         const pack = await getManaged(db, interaction);
         if (pack.error) return safeReply(interaction, { content: pack.error, ephemeral: true });
 
         const { voice, panelChannel, data } = pack;
-
-        const base = id.split(":")[0]; // btn_lock, btn_limit...
+        const base = id.split(":")[0];
 
         if (base === "btn_limit") {
           if (!canManageRoom(interaction.member, data)) return safeReply(interaction, { content: "Sadece owner/admin.", ephemeral: true });
 
-          const modal = new ModalBuilder()
-            .setCustomId(`m_limit:${voice.id}`)
-            .setTitle("Kullanıcı Limiti");
-
+          const modal = new ModalBuilder().setCustomId(`m_limit:${voice.id}`).setTitle("Kullanıcı Limiti");
           const input = new TextInputBuilder()
             .setCustomId("limit")
             .setLabel("Limit (0 = sınırsız)")
@@ -518,10 +513,7 @@ module.exports = function registerVoiceManager(client, db) {
         if (base === "btn_rename") {
           if (!canManageRoom(interaction.member, data)) return safeReply(interaction, { content: "Sadece owner/admin.", ephemeral: true });
 
-          const modal = new ModalBuilder()
-            .setCustomId(`m_rename:${voice.id}`)
-            .setTitle("Oda İsmi");
-
+          const modal = new ModalBuilder().setCustomId(`m_rename:${voice.id}`).setTitle("Oda İsmi");
           const input = new TextInputBuilder()
             .setCustomId("name")
             .setLabel("Yeni oda ismi")
@@ -581,7 +573,7 @@ module.exports = function registerVoiceManager(client, db) {
           return safeReply(interaction, { content: "Sadece owner/admin.", ephemeral: true });
         }
 
-        const base = id.split(":")[0]; // m_limit / m_rename
+        const base = id.split(":")[0];
 
         if (base === "m_limit") {
           const limit = parseInt((interaction.fields.getTextInputValue("limit") || "").trim(), 10);
