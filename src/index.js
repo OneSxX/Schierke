@@ -35,7 +35,7 @@ client.once("ready", async () => {
   try {
     client.user.setPresence({
       status: "online",
-      activities: [{ name: "Voice Manager", type: 0 }],
+      activities: [{ name: "Voice Manager ve Ticket Sistemi", type: 0 }],
     });
   } catch (e) {
     console.error("Presence hatası:", e?.message || e);
@@ -71,3 +71,4 @@ client.login(TOKEN);
 setInterval(() => {
   console.log("⏱️ Bot alive:", new Date().toISOString());
 }, 5 * 60 * 1000); // 5 dakikada bir
+
