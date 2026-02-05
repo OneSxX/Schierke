@@ -68,3 +68,6 @@ try {
 // ✅ EN SON login (client tanımlandıktan sonra)
 client.login(TOKEN);
 
+setInterval(() => {
+  console.log("⏱️ Bot alive:", new Date().toISOString());
+}, 5 * 60 * 1000); // 5 dakikada bir
