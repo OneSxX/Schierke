@@ -15,12 +15,56 @@ async function registerGlobalCommands(appId, token) {
           description: "Oda oluşturma voice kanalı",
           type: 7, // CHANNEL
           required: true,
+          // ✅ Sadece voice seçilsin
+          channel_types: [2], // 2 = GUILD_VOICE
         },
       ],
     },
-    { name: "setup", description: "Bulunduğun voice kanalı panel ile yönet (kalıcı).", type: 1 },
-    { name: "panel", description: "Bulunduğun voice kanala paneli bas/güncelle.", type: 1 },
-    { name: "kapat", description: "Bulunduğun voice kanalın yönetimini kapat (admin).", type: 1 },
+
+    {
+      name: "setup",
+      description: "Seçilen voice kanalına panel ile yönetim kur (kalıcı).",
+      type: 1,
+      options: [
+        {
+          name: "kanal",
+          description: "Hedef voice kanal (boşsa bulunduğun kanal)",
+          type: 7, // CHANNEL
+          required: false,
+          channel_types: [2], // GUILD_VOICE
+        },
+      ],
+    },
+
+    {
+      name: "panel",
+      description: "Seçilen voice kanala paneli bas/güncelle.",
+      type: 1,
+      options: [
+        {
+          name: "kanal",
+          description: "Hedef voice kanal (boşsa bulunduğun kanal)",
+          type: 7,
+          required: false,
+          channel_types: [2],
+        },
+      ],
+    },
+
+    {
+      name: "kapat",
+      description: "Seçilen voice kanalın yönetimini kapat (admin).",
+      type: 1,
+      options: [
+        {
+          name: "kanal",
+          description: "Hedef voice kanal (boşsa bulunduğun kanal)",
+          type: 7,
+          required: false,
+          channel_types: [2],
+        },
+      ],
+    },
 
     // =========================
     // TICKET KOMUTLARI (istersen)
