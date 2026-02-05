@@ -106,7 +106,7 @@ function buildPanelComponents(data) {
       .setPlaceholder("🛠️ Oda yetkilileri seç")
       .setMinValues(0)
       .setMaxValues(10)
-      .addDefaultUsers(...(data.mods || []).slice(0, 10))
+      .addDefaultUsers((data.allow || []).slice(0, 10))
   );
 
   const allowSel = new ActionRowBuilder().addComponents(
@@ -115,7 +115,7 @@ function buildPanelComponents(data) {
       .setPlaceholder("✅ Odaya girebilecek kullanıcılar")
       .setMinValues(0)
       .setMaxValues(25)
-      .addDefaultUsers(...(data.allow || []).slice(0, 25))
+      .addDefaultUsers((data.allow || []).slice(0, 25))
   );
 
   const denySel = new ActionRowBuilder().addComponents(
@@ -124,7 +124,7 @@ function buildPanelComponents(data) {
       .setPlaceholder("⛔ Reddedilecek kullanıcılar")
       .setMinValues(0)
       .setMaxValues(25)
-      .addDefaultUsers(...(data.deny || []).slice(0, 25))
+      .addDefaultUsers((data.allow || []).slice(0, 25))
   );
 
   const buttons = new ActionRowBuilder().addComponents(
@@ -438,7 +438,7 @@ if (!allowed.has(interaction.commandName)) return;
   if (id.startsWith("ticket_") || id === "ticket_open") return;
 
   const pack = await getManaged(db, interaction);
-  ...
+
 }
         if (pack.error) return safeReply(interaction, { content: pack.error, ephemeral: true });
 
@@ -550,5 +550,6 @@ module.exports.applyVoicePerms = applyVoicePerms;
 module.exports.upsertPanel = upsertPanel;
 module.exports.VC_KEY = VC_KEY;
 module.exports.TEMP_TEMPLATE_KEY = TEMP_TEMPLATE_KEY;
+
 
 
