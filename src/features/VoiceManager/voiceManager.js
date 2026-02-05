@@ -21,6 +21,17 @@
  * FIX ✅ (/kapat FULL RESET):
  * - Kanal adı hariç her şeyi sıfırlar: overwrite'lar temizlenir, userLimit 0 yapılır, panel mesajı silinir,
  *   DB kaydı silinir. Sonra /setup ile tertemiz kurulur.
+ *
+ * FIX ✅ (/setup GUARD + /panel SYNC):
+ * - /setup: Aynı kanalda setup zaten varsa tekrar kurmaz, panel de basmaz.
+ * - /panel: Panel mesajı silindiyse veya güncel değilse, kanaldaki izin/limit/lock’u okuyup (sync)
+ *   aynı görünümle yeniden panel basar. Böylece panel + izinler senkron kalır.
+ *
+ * RULE ✅ (VOICE CHAT ONLY):
+ * - /panel: SADECE voice kanal chat'inde çalışır (başka yerde asla çalışmaz)
+ * - /setup: 2 mod
+ *   - Eğer "kanal" parametresi VERİLMEDİYSE => SADECE voice kanal chat'inde kullanılabilir.
+ *   - Eğer "kanal" parametresi VERİLDİYSE => her yerden kullanılabilir (hedef voice'a kurar).
  */
 
 const {
@@ -90,14 +101,7 @@ async function applyVoicePerms(guild, voice, data) {
   const previouslyManaged = new Set(data.managedPermIds || []);
 
   // Şu an yönetilecek kullanıcılar
-  const desiredManaged = new Set(
-    [
-      data.ownerId,
-      ...(data.mods || []),
-      ...(data.allow || []),
-      ...(data.deny || []),
-    ].filter(Boolean)
-  );
+  const desiredManaged = new Set([data.ownerId, ...(data.mods || []), ...(data.allow || []), ...(data.deny || [])].filter(Boolean));
 
   // ✅ Listeden çıkarılanların overwrite'unu temizle
   for (const id of previouslyManaged) {
@@ -107,9 +111,7 @@ async function applyVoicePerms(guild, voice, data) {
   }
 
   // @everyone connect
-  await voice.permissionOverwrites
-    .edit(everyoneId, { Connect: data.locked ? false : true })
-    .catch(() => {});
+  await voice.permissionOverwrites.edit(everyoneId, { Connect: data.locked ? false : true }).catch(() => {});
 
   // deny list
   for (const id of data.deny || []) {
@@ -129,6 +131,62 @@ async function applyVoicePerms(guild, voice, data) {
 
   // ✅ Managed set'i güncelle
   data.managedPermIds = Array.from(desiredManaged);
+}
+
+// -------------------- SYNC: channel -> data --------------------
+/**
+ * /panel için: kanalın mevcut userLimit + connect overwrite'larından
+ * locked/allow/deny görünümünü senkronlar.
+ *
+ * owner/mod listesi DB'de kalır (kanaldan %100 güvenilir owner/mod çıkarımı yok).
+ */
+async function syncDataFromChannel(guild, voice, data) {
+  const everyoneId = guild.roles.everyone.id;
+
+  // limit
+  data.userLimit = Number.isInteger(voice.userLimit) ? voice.userLimit : 0;
+
+  // locked (@everyone Connect deny ise locked = true)
+  const everyoneOw = voice.permissionOverwrites.cache.get(everyoneId);
+  const everyoneDenied = !!everyoneOw?.deny?.has?.(PermissionFlagsBits.Connect);
+  data.locked = everyoneDenied;
+
+  const modsSet = new Set(data.mods || []);
+  const ownerId = data.ownerId;
+
+  const allow = [];
+  const deny = [];
+
+  for (const [id, ow] of voice.permissionOverwrites.cache) {
+    if (id === everyoneId) continue;
+
+    // sadece MEMBER overwrite'larını al (role olanları ignore)
+    // discord.js v14'te ow.type: 0=Role, 1=Member
+    if (typeof ow.type !== "undefined" && ow.type === 0) continue;
+
+    const allowConnect = !!ow.allow?.has?.(PermissionFlagsBits.Connect);
+    const denyConnect = !!ow.deny?.has?.(PermissionFlagsBits.Connect);
+
+    // Sadece "açık net" durumları topla
+    if (allowConnect && !denyConnect) {
+      if (id !== ownerId && !modsSet.has(id)) allow.push(id);
+    } else if (denyConnect && !allowConnect) {
+      if (id !== ownerId && !modsSet.has(id)) deny.push(id);
+    }
+  }
+
+  data.allow = uniq(allow);
+  data.deny = uniq(deny);
+
+  // managedPermIds güncel tut (stale cleanup düzgün çalışsın)
+  data.managedPermIds = uniq([ownerId, ...(data.mods || []), ...(data.allow || []), ...(data.deny || [])].filter(Boolean));
+}
+
+// -------------------- Voice-chat guards --------------------
+async function getVoiceFromInteractionChannel(interaction) {
+  const ch = await interaction.guild.channels.fetch(interaction.channelId).catch(() => null);
+  if (!ch || ch.type !== ChannelType.GuildVoice) return null;
+  return ch;
 }
 
 // -------------------- Panel UI --------------------
@@ -235,9 +293,7 @@ async function autoUpdateTempTemplateFromChannel(db, guildId, voice, data) {
 }
 
 async function afterChange(db, guild, voice, data, panelChannel) {
-  // ✅ önce uygula (managedPermIds burada güncelleniyor)
   await applyVoicePerms(guild, voice, data);
-  // ✅ sonra DB'ye yaz
   await db.set(VC_KEY(panelChannel.id), data);
 
   await upsertPanel(panelChannel, data, db);
@@ -296,9 +352,7 @@ module.exports = function registerVoiceManager(client, db) {
         const displayName = newState.member.displayName || newState.member.user.username;
         const userTpl = await db.get(USER_TPL_KEY(guild.id, newState.member.id));
         const channelName =
-          userTpl?.name && String(userTpl.name).trim().length > 0
-            ? String(userTpl.name).trim()
-            : `📍・${displayName} Odası`;
+          userTpl?.name && String(userTpl.name).trim().length > 0 ? String(userTpl.name).trim() : `📍・${displayName} Odası`;
 
         const voice = await guild.channels.create({
           name: channelName,
@@ -383,11 +437,72 @@ module.exports = function registerVoiceManager(client, db) {
           return safeReply(interaction, { content: `✅ Join-to-create ayarlandı: **${ch.name}**`, ephemeral: true });
         }
 
-        // ✅ /setup /panel /kapat hedef seçimi
+        // ✅ opt voice seçimi (/setup ve /kapat için serbest, /panel için kısıt)
         const optCh = interaction.options.getChannel("kanal", false);
-        let voice = optCh ?? interaction.member?.voice?.channel;
 
         await interaction.deferReply({ ephemeral: true }).catch(() => {});
+
+        // ---------- /panel (VOICE CHAT ONLY) ----------
+        if (interaction.commandName === "panel") {
+          // /panel her zaman voice chatten çalışır, parametreyle bile olmaz
+          const voiceChat = await getVoiceFromInteractionChannel(interaction);
+          if (!voiceChat) {
+            return safeReply(interaction, {
+              content: "❌ **/panel** sadece **voice kanal chat’inde** kullanılabilir.",
+              ephemeral: true,
+            });
+          }
+
+          const voice = voiceChat;
+          const panelChannel = voice;
+
+          const data = await db.get(VC_KEY(panelChannel.id));
+          if (!data) {
+            return safeReply(interaction, { content: "Bu kanal yönetilmiyor. Önce **/setup** ile kur.", ephemeral: true });
+          }
+
+          if (!canManageRoom(interaction.member, data)) {
+            return safeReply(interaction, { content: "Paneli sadece oda sahibi veya admin güncelleyebilir.", ephemeral: true });
+          }
+
+          if (!Array.isArray(data.managedPermIds)) data.managedPermIds = [];
+
+          // ✅ SYNC: kanalın mevcut izin/limit/lock durumunu panel görünümüne yansıt
+          await syncDataFromChannel(interaction.guild, voice, data);
+          await db.set(VC_KEY(panelChannel.id), data);
+
+          // upsert: panel silindiyse yeniden basar (sync edilmiş data ile)
+          await upsertPanel(panelChannel, data, db);
+
+          return safeReply(interaction, { content: `✅ Panel güncellendi: **${voice.name}**`, ephemeral: true });
+        }
+
+        // ---------- /setup & /kapat ----------
+        // /setup: kanal parametresi YOKSA => voice chat'te olmalı
+        // /setup: kanal parametresi VARSA => her yerden çalışır
+        // /kapat: aynı mantıkla (istersen bunu da voice chat only yapabiliriz ama şimdilik serbest bıraktım)
+
+        let voice = null;
+
+        if (!optCh) {
+          // kanal seçilmemiş => /setup voice chat zorunlu
+          if (interaction.commandName === "setup") {
+            const voiceChat = await getVoiceFromInteractionChannel(interaction);
+            if (!voiceChat) {
+              return safeReply(interaction, {
+                content: "❌ **/setup** (kanal parametresi olmadan) sadece **voice kanal chat’inde** kullanılabilir.\nBaşka yerde kullanacaksan: **/setup kanal:** seç.",
+                ephemeral: true,
+              });
+            }
+            voice = voiceChat;
+          } else {
+            // /kapat için (kanal parametresi yoksa) önce voice chat varsa onu al, yoksa kullanıcı voice'undan al
+            voice = (await getVoiceFromInteractionChannel(interaction)) ?? interaction.member?.voice?.channel ?? null;
+          }
+        } else {
+          // kanal seçilmiş
+          voice = optCh;
+        }
 
         if (!voice) {
           return safeReply(interaction, { content: "Hedef voice seç veya bir voice kanala gir.", ephemeral: true });
@@ -401,6 +516,15 @@ module.exports = function registerVoiceManager(client, db) {
         if (interaction.commandName === "setup") {
           if (!isServerOwnerOrAdmin(interaction.member)) {
             return safeReply(interaction, { content: "Bu komutu sadece admin/sunucu sahibi kullanabilir.", ephemeral: true });
+          }
+
+          // ✅ GUARD: zaten kuruluysa /setup tekrar kurmaz, panel basmaz
+          const existing = await db.get(VC_KEY(panelChannel.id));
+          if (existing) {
+            return safeReply(interaction, {
+              content: `⚠️ Bu voice zaten yönetiliyor: **${voice.name}**\nPaneli tekrar görmek için: **/panel** (voice chat’te)`,
+              ephemeral: true,
+            });
           }
 
           const data = {
@@ -417,24 +541,14 @@ module.exports = function registerVoiceManager(client, db) {
 
           await applyVoicePerms(interaction.guild, voice, data);
           await db.set(VC_KEY(panelChannel.id), data);
+
+          // /setup her modda panel basar. (senin isteğine göre: setup zaten varsa basmayacak, yoksa basacak)
+          // Not: setup "kanal:" ile başka yerden çalışsa bile panel yine voice chat'e basılır (voice kanalın chat'ine).
           await upsertPanel(panelChannel, data, db);
 
           return safeReply(interaction, { content: `✅ Kalıcı panel kuruldu: **${voice.name}**`, ephemeral: true });
         }
 
-        if (interaction.commandName === "panel") {
-          const data = await db.get(VC_KEY(panelChannel.id));
-          if (!data) return safeReply(interaction, { content: "Bu kanal yönetilmiyor.", ephemeral: true });
-
-          if (!canManageRoom(interaction.member, data)) {
-            return safeReply(interaction, { content: "Paneli sadece oda sahibi veya admin güncelleyebilir.", ephemeral: true });
-          }
-
-          await upsertPanel(panelChannel, data, db);
-          return safeReply(interaction, { content: `✅ Panel güncellendi: **${voice.name}**`, ephemeral: true });
-        }
-
-        // ✅✅✅ UPDATED: /kapat FULL RESET (isim hariç her şey sıfır)
         if (interaction.commandName === "kapat") {
           if (!isServerOwnerOrAdmin(interaction.member)) {
             return safeReply(interaction, { content: "Bu komutu sadece admin/sunucu sahibi kullanabilir.", ephemeral: true });
@@ -449,9 +563,7 @@ module.exports = function registerVoiceManager(client, db) {
               const msg = await panelChannel.messages.fetch(data.panelMessageId).catch(() => null);
               if (msg) await msg.delete().catch(() => {});
             }
-          } catch (e) {
-            // ignore
-          }
+          } catch (e) {}
 
           // 2) Limit sıfırla
           await panelChannel.setUserLimit(0).catch(() => {});
@@ -624,7 +736,9 @@ module.exports = function registerVoiceManager(client, db) {
 
         if (base === "m_limit") {
           const limit = parseInt((interaction.fields.getTextInputValue("limit") || "").trim(), 10);
-          if (Number.isNaN(limit) || limit < 0 || limit > 99) return safeReply(interaction, { content: "0-99 arası sayı gir.", ephemeral: true });
+          if (Number.isNaN(limit) || limit < 0 || limit > 99) {
+            return safeReply(interaction, { content: "0-99 arası sayı gir.", ephemeral: true });
+          }
 
           data.userLimit = limit;
           await voice.setUserLimit(limit).catch(() => {});
