@@ -4,6 +4,11 @@
  * - Join-to-create kanalına giren kullanıcıya temp oda açar, kullanıcıyı taşır
  * - Panel/izin/limit/lock/rename/clear yönetimi (voice kanal chat'inde)
  * - Ticket butonlarıyla çakışmayı engeller (t_ prefix)
+ *
+ * FIX ✅:
+ * - Panelden yapılan tüm işlemler artık interaction.member.voice.channel yerine
+ *   panelin bağlı olduğu hedef kanal ID'si üzerinden yapılır.
+ * - customId'lere kanalId gömülür (btn_/sel_/m_ ... :<channelId>)
  */
 
 const {
@@ -90,10 +95,11 @@ async function applyVoicePerms(guild, voice, data) {
 }
 
 // -------------------- Panel UI --------------------
-function buildPanelComponents(data) {
+// FIX: targetChannelId customId'lere gömülüyor
+function buildPanelComponents(data, targetChannelId) {
   const ownerSel = new ActionRowBuilder().addComponents(
     new UserSelectMenuBuilder()
-      .setCustomId("sel_owner")
+      .setCustomId(`sel_owner:${targetChannelId}`)
       .setPlaceholder("👑 Oda sahibi seç")
       .setMinValues(1)
       .setMaxValues(1)
@@ -102,7 +108,7 @@ function buildPanelComponents(data) {
 
   const modsSel = new ActionRowBuilder().addComponents(
     new UserSelectMenuBuilder()
-      .setCustomId("sel_mods")
+      .setCustomId(`sel_mods:${targetChannelId}`)
       .setPlaceholder("🛠️ Oda yetkilileri seç")
       .setMinValues(0)
       .setMaxValues(10)
@@ -111,7 +117,7 @@ function buildPanelComponents(data) {
 
   const allowSel = new ActionRowBuilder().addComponents(
     new UserSelectMenuBuilder()
-      .setCustomId("sel_allow")
+      .setCustomId(`sel_allow:${targetChannelId}`)
       .setPlaceholder("✅ Odaya girebilecek kullanıcılar")
       .setMinValues(0)
       .setMaxValues(25)
@@ -120,7 +126,7 @@ function buildPanelComponents(data) {
 
   const denySel = new ActionRowBuilder().addComponents(
     new UserSelectMenuBuilder()
-      .setCustomId("sel_deny")
+      .setCustomId(`sel_deny:${targetChannelId}`)
       .setPlaceholder("⛔ Reddedilecek kullanıcılar")
       .setMinValues(0)
       .setMaxValues(25)
@@ -128,11 +134,11 @@ function buildPanelComponents(data) {
   );
 
   const buttons = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("btn_lock").setEmoji("🔒").setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId("btn_unlock").setEmoji("🔓").setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId("btn_limit").setEmoji("👥").setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId("btn_rename").setEmoji("✏️").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("btn_clear").setEmoji("🧹").setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId(`btn_lock:${targetChannelId}`).setEmoji("🔒").setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`btn_unlock:${targetChannelId}`).setEmoji("🔓").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`btn_limit:${targetChannelId}`).setEmoji("👥").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`btn_rename:${targetChannelId}`).setEmoji("✏️").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`btn_clear:${targetChannelId}`).setEmoji("🧹").setStyle(ButtonStyle.Secondary)
   );
 
   return [ownerSel, modsSel, allowSel, denySel, buttons];
@@ -145,7 +151,7 @@ async function upsertPanel(panelChannel, data, db) {
 
   const doEdit = async () => {
     const content = `**Voice Manager** • ${data.locked ? "🔒 Kilitli" : "🔓 Açık"} • Limit: **${data.userLimit ?? 0}**`;
-    const components = buildPanelComponents(data);
+    const components = buildPanelComponents(data, panelChannel.id);
 
     let msg = null;
     if (data.panelMessageId) {
@@ -205,11 +211,32 @@ async function afterChange(db, guild, voice, data, panelChannel) {
 }
 
 // -------------------- Interaction helpers --------------------
-async function getManaged(db, interaction) {
-  const voice = interaction.member?.voice?.channel;
-  if (!voice) return { error: "Voice kanalda değilsin." };
+// FIX: hedef voice kanalını interaction.customId'den bul
+function extractTargetChannelIdFromCustomId(customId) {
+  if (!customId || typeof customId !== "string") return null;
+  const parts = customId.split(":");
+  if (parts.length < 2) return null;
+  const maybeId = parts[1];
+  return /^\d{15,25}$/.test(maybeId) ? maybeId : null;
+}
 
-  const panelChannel = voice; // voice chat'e panel
+async function getManaged(db, interaction) {
+  const customId = interaction.customId || "";
+  let targetId = extractTargetChannelIdFromCustomId(customId);
+
+  // Slash komutlarda customId yok; fallback: kullanıcının bulunduğu voice
+  if (!targetId) {
+    const v = interaction.member?.voice?.channel;
+    if (!v) return { error: "Voice kanalda değilsin." };
+    targetId = v.id;
+  }
+
+  const voice = await interaction.guild.channels.fetch(targetId).catch(() => null);
+  if (!voice || voice.type !== ChannelType.GuildVoice) {
+    return { error: "Hedef voice kanal bulunamadı." };
+  }
+
+  const panelChannel = voice; // panel voice chat'e bağlı
   const data = await db.get(VC_KEY(panelChannel.id));
   if (!data) return { error: "Bu voice kanal bot tarafından yönetilmiyor." };
 
@@ -332,7 +359,7 @@ module.exports = function registerVoiceManager(client, db) {
           return safeReply(interaction, { content: `✅ Join-to-create ayarlandı: **${ch.name}**`, ephemeral: true });
         }
 
-        // diğer slashlar voice ister
+        // diğer slashlar voice ister (kalıcı panel kuracağın kanalın içinde olman yeter)
         const voice = interaction.member?.voice?.channel;
         if (!voice) {
           await interaction.deferReply({ ephemeral: true }).catch(() => {});
@@ -403,7 +430,9 @@ module.exports = function registerVoiceManager(client, db) {
         const { voice, panelChannel, data } = pack;
         await interaction.deferUpdate().catch(() => {});
 
-        if (interaction.customId === "sel_owner") {
+        const base = interaction.customId.split(":")[0]; // sel_owner / sel_mods ...
+
+        if (base === "sel_owner") {
           if (!canManageRoom(interaction.member, data)) {
             return safeFollowUp(interaction, { content: "Sahibi sadece owner veya admin değiştirebilir.", ephemeral: true });
           }
@@ -412,7 +441,7 @@ module.exports = function registerVoiceManager(client, db) {
           return safeFollowUp(interaction, { content: "👑 Sahip güncellendi.", ephemeral: true });
         }
 
-        if (interaction.customId === "sel_mods") {
+        if (base === "sel_mods") {
           if (!canManageRoom(interaction.member, data)) {
             return safeFollowUp(interaction, { content: "Yetkilileri sadece owner veya admin değiştirebilir.", ephemeral: true });
           }
@@ -421,7 +450,7 @@ module.exports = function registerVoiceManager(client, db) {
           return safeFollowUp(interaction, { content: "🛠️ Yetkililer güncellendi.", ephemeral: true });
         }
 
-        if (interaction.customId === "sel_allow") {
+        if (base === "sel_allow") {
           if (!canEditAllowDeny(interaction.member, data)) {
             return safeFollowUp(interaction, { content: "Allow listesini sadece owner/yetkili veya admin değiştirebilir.", ephemeral: true });
           }
@@ -431,7 +460,7 @@ module.exports = function registerVoiceManager(client, db) {
           return safeFollowUp(interaction, { content: "✅ Girebilenler güncellendi.", ephemeral: true });
         }
 
-        if (interaction.customId === "sel_deny") {
+        if (base === "sel_deny") {
           if (!canEditAllowDeny(interaction.member, data)) {
             return safeFollowUp(interaction, { content: "Deny listesini sadece owner/yetkili veya admin değiştirebilir.", ephemeral: true });
           }
@@ -466,10 +495,15 @@ module.exports = function registerVoiceManager(client, db) {
 
         const { voice, panelChannel, data } = pack;
 
-        if (id === "btn_limit") {
+        const base = id.split(":")[0]; // btn_lock, btn_limit...
+
+        if (base === "btn_limit") {
           if (!canManageRoom(interaction.member, data)) return safeReply(interaction, { content: "Sadece owner/admin.", ephemeral: true });
 
-          const modal = new ModalBuilder().setCustomId("m_limit").setTitle("Kullanıcı Limiti");
+          const modal = new ModalBuilder()
+            .setCustomId(`m_limit:${voice.id}`)
+            .setTitle("Kullanıcı Limiti");
+
           const input = new TextInputBuilder()
             .setCustomId("limit")
             .setLabel("Limit (0 = sınırsız)")
@@ -481,10 +515,13 @@ module.exports = function registerVoiceManager(client, db) {
           return interaction.showModal(modal);
         }
 
-        if (id === "btn_rename") {
+        if (base === "btn_rename") {
           if (!canManageRoom(interaction.member, data)) return safeReply(interaction, { content: "Sadece owner/admin.", ephemeral: true });
 
-          const modal = new ModalBuilder().setCustomId("m_rename").setTitle("Oda İsmi");
+          const modal = new ModalBuilder()
+            .setCustomId(`m_rename:${voice.id}`)
+            .setTitle("Oda İsmi");
+
           const input = new TextInputBuilder()
             .setCustomId("name")
             .setLabel("Yeni oda ismi")
@@ -502,19 +539,19 @@ module.exports = function registerVoiceManager(client, db) {
           return safeReply(interaction, { content: "Bu butonları sadece owner/admin kullanabilir.", ephemeral: true });
         }
 
-        if (id === "btn_lock") {
+        if (base === "btn_lock") {
           data.locked = true;
           await afterChange(db, interaction.guild, voice, data, panelChannel);
           return safeReply(interaction, { content: "🔒 Kilitlendi.", ephemeral: true });
         }
 
-        if (id === "btn_unlock") {
+        if (base === "btn_unlock") {
           data.locked = false;
           await afterChange(db, interaction.guild, voice, data, panelChannel);
           return safeReply(interaction, { content: "🔓 Açıldı.", ephemeral: true });
         }
 
-        if (id === "btn_clear") {
+        if (base === "btn_clear") {
           data.mods = [];
           data.allow = [];
           data.deny = [];
@@ -544,7 +581,9 @@ module.exports = function registerVoiceManager(client, db) {
           return safeReply(interaction, { content: "Sadece owner/admin.", ephemeral: true });
         }
 
-        if (id === "m_limit") {
+        const base = id.split(":")[0]; // m_limit / m_rename
+
+        if (base === "m_limit") {
           const limit = parseInt((interaction.fields.getTextInputValue("limit") || "").trim(), 10);
           if (Number.isNaN(limit) || limit < 0 || limit > 99) return safeReply(interaction, { content: "0-99 arası sayı gir.", ephemeral: true });
 
@@ -554,7 +593,7 @@ module.exports = function registerVoiceManager(client, db) {
           return safeReply(interaction, { content: `👥 Limit: ${limit}`, ephemeral: true });
         }
 
-        if (id === "m_rename") {
+        if (base === "m_rename") {
           const name = (interaction.fields.getTextInputValue("name") || "").trim();
           if (!name) return safeReply(interaction, { content: "İsim boş olamaz.", ephemeral: true });
 
